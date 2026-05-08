@@ -1,0 +1,23 @@
+{
+  "name": "timcode-agentic-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "node --test dist/**/*.test.js",
+    "dev": "node --enable-source-maps --loader ts-node/esm src/index.ts"
+  },
+  "dependencies": {
+    "openai": "^4.104.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.31",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.8.3"
+  }
+}
