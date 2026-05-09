@@ -4,12 +4,15 @@ import { createUserMessage, createSystemMessage } from "../session/messages.js";
 import {
   appendAgentMessage,
   createSession,
+  getTeamStatus,
   listAgentMessages,
   listChildSessions,
   loadSession,
   saveSession,
+  updateSessionLifecycle,
   type AgentMessageSummary,
   type SessionSummary,
+  type TeamStatusSummary,
 } from "../session/store.js";
 import type { ProviderAdapter } from "../provider/types.js";
 import { LocalToolAdapter } from "../tools/local-tools.js";
@@ -34,6 +37,9 @@ export interface SubAgentRunner {
   listChildSessions(): Promise<SessionSummary[]>;
   listAgentMessages(sessionId: string): Promise<AgentMessageSummary[]>;
   sendMessage(sessionId: string, content: string): Promise<AgentMessageSummary>;
+  getTeamStatus(): Promise<TeamStatusSummary | null>;
+  requestShutdown(sessionId: string): Promise<SessionSummary>;
+  cleanupSession(sessionId: string): Promise<SessionSummary>;
 }
 
 export class LocalSubAgentRunner implements SubAgentRunner {
@@ -77,6 +83,7 @@ export class LocalSubAgentRunner implements SubAgentRunner {
       };
     } finally {
       await toolAdapter.dispose?.();
+      session.lifecycleState = "completed";
       await (this.options.saveSession ?? saveSession)(session);
       if (session.parentSessionId) {
         await appendAgentMessage({
@@ -129,10 +136,57 @@ export class LocalSubAgentRunner implements SubAgentRunner {
     });
   }
 
+  async getTeamStatus(): Promise<TeamStatusSummary | null> {
+    if (!this.options.parentSessionId) {
+      return null;
+    }
+
+    return getTeamStatus(this.options.parentSessionId);
+  }
+
+  async requestShutdown(sessionId: string): Promise<SessionSummary> {
+    if (!this.options.parentSessionId) {
+      throw new Error("Parent session is not configured for this runner.");
+    }
+
+    await this.assertDirectChildSession(sessionId);
+    const session = await updateSessionLifecycle(sessionId, "shutdown_requested");
+    await appendAgentMessage({
+      sessionId,
+      fromSessionId: this.options.parentSessionId,
+      toSessionId: sessionId,
+      direction: "parent_to_child",
+      content: "Shutdown requested by parent session.",
+    });
+    return toSessionSummary(session);
+  }
+
+  async cleanupSession(sessionId: string): Promise<SessionSummary> {
+    if (!this.options.parentSessionId) {
+      throw new Error("Parent session is not configured for this runner.");
+    }
+
+    await this.assertDirectChildSession(sessionId);
+    const session = await updateSessionLifecycle(sessionId, "cleaned_up");
+    return toSessionSummary(session);
+  }
+
   private async assertDirectChildSession(sessionId: string): Promise<void> {
     const session = await loadSession(sessionId);
     if (session.parentSessionId !== this.options.parentSessionId) {
       throw new Error(`Session ${sessionId} is not a direct child of ${this.options.parentSessionId}.`);
     }
   }
+}
+
+function toSessionSummary(session: Awaited<ReturnType<typeof loadSession>>): SessionSummary {
+  return {
+    id: session.id,
+    parentSessionId: session.parentSessionId,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    lifecycleState: session.lifecycleState,
+    messageCount: session.messages.length,
+    lastAssistantText: [...session.messages].reverse().find((message) => message.role === "assistant")?.content ?? "",
+  };
 }

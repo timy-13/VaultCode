@@ -46,12 +46,15 @@ export interface AgentMessageRecord {
   content: string;
 }
 
+export type SessionLifecycleState = "running" | "shutdown_requested" | "completed" | "cleaned_up";
+
 export interface Session {
   schemaVersion: number;
   id: string;
   parentSessionId?: string;
   createdAt: string;
   updatedAt: string;
+  lifecycleState: SessionLifecycleState;
   messages: SessionMessage[];
   agentMessages: AgentMessageRecord[];
   toolHistory: string[];

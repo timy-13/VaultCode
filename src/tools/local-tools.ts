@@ -126,6 +126,11 @@ export class LocalToolAdapter implements ToolAdapter {
               inputSchema: objectSchema({}, []),
             },
             {
+              name: "team_status",
+              description: "Show aggregate lifecycle status for the parent session and its direct child agent sessions",
+              inputSchema: objectSchema({}, []),
+            },
+            {
               name: "list_agent_messages",
               description: "List persisted parent/child messages for a direct child agent session",
               inputSchema: objectSchema({ sessionId: stringField("Direct child session ID") }, ["sessionId"]),
@@ -140,6 +145,16 @@ export class LocalToolAdapter implements ToolAdapter {
                 },
                 ["sessionId", "content"],
               ),
+            },
+            {
+              name: "request_agent_shutdown",
+              description: "Mark a direct child agent session as shutdown requested",
+              inputSchema: objectSchema({ sessionId: stringField("Direct child session ID") }, ["sessionId"]),
+            },
+            {
+              name: "cleanup_agent_session",
+              description: "Mark a direct child agent session as cleaned up",
+              inputSchema: objectSchema({ sessionId: stringField("Direct child session ID") }, ["sessionId"]),
             },
             {
               name: "spawn_agent",
@@ -239,10 +254,16 @@ export class LocalToolAdapter implements ToolAdapter {
         return this.listAgentTypes();
       case "list_agent_sessions":
         return this.listAgentSessions();
+      case "team_status":
+        return this.teamStatus();
       case "list_agent_messages":
         return this.listAgentMessages(expectString(call.input.sessionId, "sessionId"));
       case "send_agent_message":
         return this.sendAgentMessage(expectString(call.input.sessionId, "sessionId"), expectString(call.input.content, "content"));
+      case "request_agent_shutdown":
+        return this.requestAgentShutdown(expectString(call.input.sessionId, "sessionId"));
+      case "cleanup_agent_session":
+        return this.cleanupAgentSession(expectString(call.input.sessionId, "sessionId"));
       default:
         throw new Error(`Unknown tool: ${call.name}`);
     }
@@ -443,6 +464,39 @@ export class LocalToolAdapter implements ToolAdapter {
           parentSessionId: session.parentSessionId ?? null,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
+          lifecycleState: session.lifecycleState,
+          messageCount: session.messageCount,
+          lastAssistantText: session.lastAssistantText,
+        })),
+      },
+    };
+  }
+
+  private async teamStatus(): Promise<{ summary: string; data: JsonValue }> {
+    if (!this.subAgentRunner) {
+      throw new Error("Sub-agent runner is not configured for this session.");
+    }
+
+    const status = await this.subAgentRunner.getTeamStatus();
+    if (!status) {
+      return {
+        summary: "No team status is available for this session",
+        data: { sessions: [] },
+      };
+    }
+
+    return {
+      summary: `Found ${status.totalSessions} session(s) in the direct team`,
+      data: {
+        parentSessionId: status.parentSessionId,
+        totalSessions: status.totalSessions,
+        counts: status.counts,
+        sessions: status.sessions.map((session) => ({
+          id: session.id,
+          parentSessionId: session.parentSessionId ?? null,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+          lifecycleState: session.lifecycleState,
           messageCount: session.messageCount,
           lastAssistantText: session.lastAssistantText,
         })),
@@ -487,6 +541,38 @@ export class LocalToolAdapter implements ToolAdapter {
         direction: message.direction,
         createdAt: message.createdAt,
         content: message.content,
+      },
+    };
+  }
+
+  private async requestAgentShutdown(sessionId: string): Promise<{ summary: string; data: JsonValue }> {
+    if (!this.subAgentRunner) {
+      throw new Error("Sub-agent runner is not configured for this session.");
+    }
+
+    const session = await this.subAgentRunner.requestShutdown(sessionId);
+    return {
+      summary: `Requested shutdown for session ${sessionId}`,
+      data: {
+        id: session.id,
+        lifecycleState: session.lifecycleState,
+        updatedAt: session.updatedAt,
+      },
+    };
+  }
+
+  private async cleanupAgentSession(sessionId: string): Promise<{ summary: string; data: JsonValue }> {
+    if (!this.subAgentRunner) {
+      throw new Error("Sub-agent runner is not configured for this session.");
+    }
+
+    const session = await this.subAgentRunner.cleanupSession(sessionId);
+    return {
+      summary: `Cleaned up session ${sessionId}`,
+      data: {
+        id: session.id,
+        lifecycleState: session.lifecycleState,
+        updatedAt: session.updatedAt,
       },
     };
   }

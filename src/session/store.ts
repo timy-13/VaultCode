@@ -3,15 +3,23 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import { resolveHarnessPaths } from "../config/paths.js";
-import { SESSION_SCHEMA_VERSION, type AgentMessageRecord, type PromptStash, type Session, type SessionMessage } from "./types.js";
+import { SESSION_SCHEMA_VERSION, type AgentMessageRecord, type PromptStash, type Session, type SessionLifecycleState, type SessionMessage } from "./types.js";
 
 export interface SessionSummary {
   id: string;
   parentSessionId?: string;
   createdAt: string;
   updatedAt: string;
+  lifecycleState: SessionLifecycleState;
   messageCount: number;
   lastAssistantText: string;
+}
+
+export interface TeamStatusSummary {
+  parentSessionId: string;
+  totalSessions: number;
+  counts: Record<SessionLifecycleState, number>;
+  sessions: SessionSummary[];
 }
 
 export interface AgentMessageSummary {
@@ -38,6 +46,7 @@ export function createSession(parentSessionId?: string): Session {
     parentSessionId,
     createdAt: timestamp,
     updatedAt: timestamp,
+    lifecycleState: "running",
     messages: [],
     agentMessages: [],
     toolHistory: [],
@@ -88,6 +97,7 @@ export async function listChildSessions(parentSessionId: string): Promise<Sessio
       parentSessionId: session.parentSessionId,
       createdAt: session.createdAt,
       updatedAt: session.updatedAt,
+      lifecycleState: session.lifecycleState,
       messageCount: session.messages.length,
       lastAssistantText,
     });
@@ -137,6 +147,46 @@ export async function listAgentMessages(sessionId: string): Promise<AgentMessage
     }));
 }
 
+export async function updateSessionLifecycle(sessionId: string, lifecycleState: SessionLifecycleState): Promise<Session> {
+  const session = await loadSession(sessionId);
+  session.lifecycleState = lifecycleState;
+  await saveSession(session);
+  return session;
+}
+
+export async function getTeamStatus(parentSessionId: string): Promise<TeamStatusSummary> {
+  const parent = await loadSession(parentSessionId);
+  const children = await listChildSessions(parentSessionId);
+  const sessions: SessionSummary[] = [
+    {
+      id: parent.id,
+      parentSessionId: parent.parentSessionId,
+      createdAt: parent.createdAt,
+      updatedAt: parent.updatedAt,
+      lifecycleState: parent.lifecycleState,
+      messageCount: parent.messages.length,
+      lastAssistantText: [...parent.messages].reverse().find((message) => message.role === "assistant")?.content ?? "",
+    },
+    ...children,
+  ];
+  const counts: Record<SessionLifecycleState, number> = {
+    running: 0,
+    shutdown_requested: 0,
+    completed: 0,
+    cleaned_up: 0,
+  };
+  for (const session of sessions) {
+    counts[session.lifecycleState] += 1;
+  }
+
+  return {
+    parentSessionId,
+    totalSessions: sessions.length,
+    counts,
+    sessions,
+  };
+}
+
 export async function loadStash(): Promise<PromptStash> {
   await ensureStorage();
   const paths = resolveHarnessPaths();
@@ -179,6 +229,7 @@ function isMissingFileError(error: unknown): boolean {
 }
 
 function normalizeSession(session: Session): Session {
+  session.lifecycleState ??= "running";
   session.agentMessages ??= [];
   return session;
 }

@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 
 import { createAssistantMessage, createUserMessage } from "./messages.js";
-import { appendAgentMessage, branchSession, createSession, listAgentMessages, listChildSessions, saveSession } from "./store.js";
+import { appendAgentMessage, branchSession, createSession, getTeamStatus, listAgentMessages, listChildSessions, saveSession, updateSessionLifecycle } from "./store.js";
 
 test("branchSession keeps history through the selected message", () => {
   const session = createSession();
@@ -101,6 +101,49 @@ test("appendAgentMessage and listAgentMessages persist parent-child notes", asyn
     assert.equal(messages.length, 1);
     assert.equal(messages[0]?.direction, "parent_to_child");
     assert.equal(messages[0]?.content, "Check the README first.");
+  } finally {
+    if (originalDataDir === undefined) {
+      delete process.env.TIMCODE_DATA_DIR;
+    } else {
+      process.env.TIMCODE_DATA_DIR = originalDataDir;
+    }
+
+    if (originalConfigDir === undefined) {
+      delete process.env.TIMCODE_CONFIG_DIR;
+    } else {
+      process.env.TIMCODE_CONFIG_DIR = originalConfigDir;
+    }
+
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("getTeamStatus aggregates parent and child lifecycle counts", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "timcode-session-store-"));
+  const originalDataDir = process.env.TIMCODE_DATA_DIR;
+  const originalConfigDir = process.env.TIMCODE_CONFIG_DIR;
+
+  process.env.TIMCODE_DATA_DIR = dataDir;
+  process.env.TIMCODE_CONFIG_DIR = dataDir;
+
+  try {
+    const parent = createSession();
+    const childOne = createSession(parent.id);
+    const childTwo = createSession(parent.id);
+    await saveSession(parent);
+    await saveSession(childOne);
+    await saveSession(childTwo);
+    await updateSessionLifecycle(childOne.id, "completed");
+    await updateSessionLifecycle(childTwo.id, "shutdown_requested");
+
+    const status = await getTeamStatus(parent.id);
+    assert.equal(status.totalSessions, 3);
+    assert.deepEqual(status.counts, {
+      running: 1,
+      shutdown_requested: 1,
+      completed: 1,
+      cleaned_up: 0,
+    });
   } finally {
     if (originalDataDir === undefined) {
       delete process.env.TIMCODE_DATA_DIR;

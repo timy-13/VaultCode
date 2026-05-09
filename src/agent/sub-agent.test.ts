@@ -6,7 +6,7 @@ import test from "node:test";
 
 import { LocalSubAgentRunner } from "./sub-agent.js";
 import { MockProvider } from "../provider/mock-provider.js";
-import { listAgentMessages } from "../session/store.js";
+import { listAgentMessages, loadSession } from "../session/store.js";
 import { LocalToolAdapter } from "../tools/local-tools.js";
 
 test("LocalSubAgentRunner saves an isolated child session and returns its result", async () => {
@@ -53,6 +53,9 @@ test("LocalSubAgentRunner saves an isolated child session and returns its result
 
     const helloPath = path.join(workspace, "hello.py");
     assert.equal(await fs.readFile(helloPath, "utf8"), 'print("Hello, world!")\n');
+
+    const childSession = await loadSession(result.sessionId);
+    assert.equal(childSession.lifecycleState, "completed");
 
     const childMessages = await listAgentMessages(result.sessionId);
     assert.equal(childMessages.length, 1);
@@ -149,3 +152,74 @@ test("LocalSubAgentRunner sends messages only to direct child sessions", async (
     await fs.rm(dataDir, { recursive: true, force: true });
   }
 });
+
+test("LocalSubAgentRunner exposes team status and lifecycle transitions for direct children", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "timcode-subagent-workspace-"));
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "timcode-subagent-data-"));
+  const originalDataDir = process.env.TIMCODE_DATA_DIR;
+  const originalConfigDir = process.env.TIMCODE_CONFIG_DIR;
+
+  process.env.TIMCODE_DATA_DIR = dataDir;
+  process.env.TIMCODE_CONFIG_DIR = dataDir;
+
+  try {
+    const parent = await createParentSessionFile(dataDir, "parent-session-1");
+    const runner = new LocalSubAgentRunner({
+      workspaceRoot: workspace,
+      provider: new MockProvider(),
+      parentSessionId: parent,
+      createToolAdapter: () => new LocalToolAdapter(workspace),
+    });
+
+    const child = await runner.run({ task: "create a hello.py file", agentType: "worker" }, new AbortController().signal);
+    const initialStatus = await runner.getTeamStatus();
+    assert.equal(initialStatus?.totalSessions, 2);
+    assert.equal(initialStatus?.counts.completed, 1);
+
+    const shutdown = await runner.requestShutdown(child.sessionId);
+    assert.equal(shutdown.lifecycleState, "shutdown_requested");
+    const cleaned = await runner.cleanupSession(child.sessionId);
+    assert.equal(cleaned.lifecycleState, "cleaned_up");
+
+    const finalStatus = await runner.getTeamStatus();
+    assert.equal(finalStatus?.counts.cleaned_up, 1);
+  } finally {
+    if (originalDataDir === undefined) {
+      delete process.env.TIMCODE_DATA_DIR;
+    } else {
+      process.env.TIMCODE_DATA_DIR = originalDataDir;
+    }
+
+    if (originalConfigDir === undefined) {
+      delete process.env.TIMCODE_CONFIG_DIR;
+    } else {
+      process.env.TIMCODE_CONFIG_DIR = originalConfigDir;
+    }
+
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+async function createParentSessionFile(dataDir: string, sessionId: string): Promise<string> {
+  const sessionsDir = path.join(dataDir, "sessions");
+  await fs.mkdir(sessionsDir, { recursive: true });
+  await fs.writeFile(
+    path.join(sessionsDir, `${sessionId}.json`),
+    JSON.stringify(
+      {
+        schemaVersion: 1,
+        id: sessionId,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        lifecycleState: "running",
+        messages: [],
+        agentMessages: [],
+        toolHistory: [],
+      },
+      null,
+      2,
+    ),
+  );
+  return sessionId;
+}

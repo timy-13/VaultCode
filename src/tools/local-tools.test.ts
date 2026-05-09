@@ -14,12 +14,14 @@ test("local tool definitions expose structured schemas", () => {
   const lspDiagnostics = adapter.listTools().find((tool) => tool.name === "lsp_diagnostics");
   const listAgentTypes = adapter.listTools().find((tool) => tool.name === "list_agent_types");
   const listAgentMessages = adapter.listTools().find((tool) => tool.name === "list_agent_messages");
+  const teamStatus = adapter.listTools().find((tool) => tool.name === "team_status");
   const spawnAgent = adapter.listTools().find((tool) => tool.name === "spawn_agent");
 
   assert.ok(write);
   assert.ok(lspDiagnostics);
   assert.equal(listAgentTypes, undefined);
   assert.equal(listAgentMessages, undefined);
+  assert.equal(teamStatus, undefined);
   assert.equal(spawnAgent, undefined);
   assert.deepEqual(write?.inputSchema.required, ["path", "content"]);
   assert.equal(write?.inputSchema.additionalProperties, false);
@@ -245,6 +247,7 @@ test("spawn_agent returns structured child-agent results through an injected run
             parentSessionId: "parent-session-1",
             createdAt: "2024-01-01T00:00:00.000Z",
             updatedAt: "2024-01-01T00:00:01.000Z",
+            lifecycleState: "completed",
             messageCount: 3,
             lastAssistantText: "Delegated task complete.",
           },
@@ -272,18 +275,78 @@ test("spawn_agent returns structured child-agent results through an injected run
           content,
         };
       },
+      async getTeamStatus() {
+        return {
+          parentSessionId: "parent-session-1",
+          totalSessions: 2,
+          counts: {
+            running: 1,
+            shutdown_requested: 0,
+            completed: 1,
+            cleaned_up: 0,
+          },
+          sessions: [
+            {
+              id: "parent-session-1",
+              parentSessionId: undefined,
+              createdAt: "2024-01-01T00:00:00.000Z",
+              updatedAt: "2024-01-01T00:00:03.000Z",
+              lifecycleState: "running",
+              messageCount: 2,
+              lastAssistantText: "",
+            },
+            {
+              id: "child-session-1",
+              parentSessionId: "parent-session-1",
+              createdAt: "2024-01-01T00:00:00.000Z",
+              updatedAt: "2024-01-01T00:00:01.000Z",
+              lifecycleState: "completed",
+              messageCount: 3,
+              lastAssistantText: "Delegated task complete.",
+            },
+          ],
+        };
+      },
+      async requestShutdown(sessionId: string) {
+        return {
+          id: sessionId,
+          parentSessionId: "parent-session-1",
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:04.000Z",
+          lifecycleState: "shutdown_requested",
+          messageCount: 3,
+          lastAssistantText: "Delegated task complete.",
+        };
+      },
+      async cleanupSession(sessionId: string) {
+        return {
+          id: sessionId,
+          parentSessionId: "parent-session-1",
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:05.000Z",
+          lifecycleState: "cleaned_up",
+          messageCount: 3,
+          lastAssistantText: "Delegated task complete.",
+        };
+      },
     };
 
     const adapter = new LocalToolAdapter(workspace, { subAgentRunner: fakeRunner });
     const listAgentTypesTool = adapter.listTools().find((tool) => tool.name === "list_agent_types");
     const listAgentSessionsTool = adapter.listTools().find((tool) => tool.name === "list_agent_sessions");
+    const teamStatusTool = adapter.listTools().find((tool) => tool.name === "team_status");
     const listAgentMessagesTool = adapter.listTools().find((tool) => tool.name === "list_agent_messages");
     const sendAgentMessageTool = adapter.listTools().find((tool) => tool.name === "send_agent_message");
+    const requestShutdownTool = adapter.listTools().find((tool) => tool.name === "request_agent_shutdown");
+    const cleanupSessionTool = adapter.listTools().find((tool) => tool.name === "cleanup_agent_session");
     const spawnTool = adapter.listTools().find((tool) => tool.name === "spawn_agent");
     assert.ok(listAgentTypesTool);
     assert.ok(listAgentSessionsTool);
+    assert.ok(teamStatusTool);
     assert.ok(listAgentMessagesTool);
     assert.ok(sendAgentMessageTool);
+    assert.ok(requestShutdownTool);
+    assert.ok(cleanupSessionTool);
     assert.ok(spawnTool);
 
     const agentTypesResult = await adapter.executeTool(
@@ -302,10 +365,34 @@ test("spawn_agent returns structured child-agent results through an injected run
       },
       new AbortController().signal,
     );
+    const teamStatusResult = await adapter.executeTool(
+      {
+        id: "call-5bb",
+        name: "team_status",
+        input: {},
+      },
+      new AbortController().signal,
+    );
     const agentMessagesResult = await adapter.executeTool(
       {
         id: "call-5c",
         name: "list_agent_messages",
+        input: { sessionId: "child-session-1" },
+      },
+      new AbortController().signal,
+    );
+    const shutdownResult = await adapter.executeTool(
+      {
+        id: "call-5e",
+        name: "request_agent_shutdown",
+        input: { sessionId: "child-session-1" },
+      },
+      new AbortController().signal,
+    );
+    const cleanupResult = await adapter.executeTool(
+      {
+        id: "call-5f",
+        name: "cleanup_agent_session",
         input: { sessionId: "child-session-1" },
       },
       new AbortController().signal,
@@ -340,6 +427,38 @@ test("spawn_agent returns structured child-agent results through an injected run
           parentSessionId: "parent-session-1",
           createdAt: "2024-01-01T00:00:00.000Z",
           updatedAt: "2024-01-01T00:00:01.000Z",
+          lifecycleState: "completed",
+          messageCount: 3,
+          lastAssistantText: "Delegated task complete.",
+        },
+      ],
+    });
+    assert.equal(teamStatusResult.ok, true);
+    assert.deepEqual(teamStatusResult.data, {
+      parentSessionId: "parent-session-1",
+      totalSessions: 2,
+      counts: {
+        running: 1,
+        shutdown_requested: 0,
+        completed: 1,
+        cleaned_up: 0,
+      },
+      sessions: [
+        {
+          id: "parent-session-1",
+          parentSessionId: null,
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:03.000Z",
+          lifecycleState: "running",
+          messageCount: 2,
+          lastAssistantText: "",
+        },
+        {
+          id: "child-session-1",
+          parentSessionId: "parent-session-1",
+          createdAt: "2024-01-01T00:00:00.000Z",
+          updatedAt: "2024-01-01T00:00:01.000Z",
+          lifecycleState: "completed",
           messageCount: 3,
           lastAssistantText: "Delegated task complete.",
         },
@@ -367,6 +486,18 @@ test("spawn_agent returns structured child-agent results through an injected run
       direction: "parent_to_child",
       createdAt: "2024-01-01T00:00:03.000Z",
       content: "Double-check the output.",
+    });
+    assert.equal(shutdownResult.ok, true);
+    assert.deepEqual(shutdownResult.data, {
+      id: "child-session-1",
+      lifecycleState: "shutdown_requested",
+      updatedAt: "2024-01-01T00:00:04.000Z",
+    });
+    assert.equal(cleanupResult.ok, true);
+    assert.deepEqual(cleanupResult.data, {
+      id: "child-session-1",
+      lifecycleState: "cleaned_up",
+      updatedAt: "2024-01-01T00:00:05.000Z",
     });
     assert.equal(result.ok, true);
     assert.equal(result.summary, "Sub-agent worker completed in session child-session-1");
