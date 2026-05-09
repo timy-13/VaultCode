@@ -116,6 +116,32 @@ export class LocalToolAdapter implements ToolAdapter {
       ...(this.subAgentRunner
         ? [
             {
+              name: "list_agent_types",
+              description: "List the built-in sub-agent types available for delegation",
+              inputSchema: objectSchema({}, []),
+            },
+            {
+              name: "list_agent_sessions",
+              description: "List direct child agent sessions spawned from the current parent session",
+              inputSchema: objectSchema({}, []),
+            },
+            {
+              name: "list_agent_messages",
+              description: "List persisted parent/child messages for a direct child agent session",
+              inputSchema: objectSchema({ sessionId: stringField("Direct child session ID") }, ["sessionId"]),
+            },
+            {
+              name: "send_agent_message",
+              description: "Send a note from the current parent session to a direct child agent session",
+              inputSchema: objectSchema(
+                {
+                  sessionId: stringField("Direct child session ID"),
+                  content: stringField("Message content to send to the child session"),
+                },
+                ["sessionId", "content"],
+              ),
+            },
+            {
               name: "spawn_agent",
               description: "Delegate a focused task to an isolated sub-agent session and return its result",
               inputSchema: objectSchema(
@@ -209,6 +235,14 @@ export class LocalToolAdapter implements ToolAdapter {
         );
       case "spawn_agent":
         return this.spawnAgent(expectString(call.input.task, "task"), expectOptionalString(call.input.agentType), signal);
+      case "list_agent_types":
+        return this.listAgentTypes();
+      case "list_agent_sessions":
+        return this.listAgentSessions();
+      case "list_agent_messages":
+        return this.listAgentMessages(expectString(call.input.sessionId, "sessionId"));
+      case "send_agent_message":
+        return this.sendAgentMessage(expectString(call.input.sessionId, "sessionId"), expectString(call.input.content, "content"));
       default:
         throw new Error(`Unknown tool: ${call.name}`);
     }
@@ -374,6 +408,85 @@ export class LocalToolAdapter implements ToolAdapter {
           durationMs: record.durationMs,
           summary: record.summary,
         })),
+      },
+    };
+  }
+
+  private async listAgentTypes(): Promise<{ summary: string; data: JsonValue }> {
+    if (!this.subAgentRunner) {
+      throw new Error("Sub-agent runner is not configured for this session.");
+    }
+
+    const agentTypes = await this.subAgentRunner.listAgentTypes();
+    return {
+      summary: `Found ${agentTypes.length} built-in agent type(s)`,
+      data: {
+        agentTypes: agentTypes.map((agentType) => ({
+          name: agentType.name,
+          description: agentType.description,
+        })),
+      },
+    };
+  }
+
+  private async listAgentSessions(): Promise<{ summary: string; data: JsonValue }> {
+    if (!this.subAgentRunner) {
+      throw new Error("Sub-agent runner is not configured for this session.");
+    }
+
+    const sessions = await this.subAgentRunner.listChildSessions();
+    return {
+      summary: `Found ${sessions.length} child agent session(s)`,
+      data: {
+        sessions: sessions.map((session) => ({
+          id: session.id,
+          parentSessionId: session.parentSessionId ?? null,
+          createdAt: session.createdAt,
+          updatedAt: session.updatedAt,
+          messageCount: session.messageCount,
+          lastAssistantText: session.lastAssistantText,
+        })),
+      },
+    };
+  }
+
+  private async listAgentMessages(sessionId: string): Promise<{ summary: string; data: JsonValue }> {
+    if (!this.subAgentRunner) {
+      throw new Error("Sub-agent runner is not configured for this session.");
+    }
+
+    const messages = await this.subAgentRunner.listAgentMessages(sessionId);
+    return {
+      summary: `Found ${messages.length} agent message(s) for session ${sessionId}`,
+      data: {
+        sessionId,
+        messages: messages.map((message) => ({
+          id: message.id,
+          fromSessionId: message.fromSessionId,
+          toSessionId: message.toSessionId,
+          direction: message.direction,
+          createdAt: message.createdAt,
+          content: message.content,
+        })),
+      },
+    };
+  }
+
+  private async sendAgentMessage(sessionId: string, content: string): Promise<{ summary: string; data: JsonValue }> {
+    if (!this.subAgentRunner) {
+      throw new Error("Sub-agent runner is not configured for this session.");
+    }
+
+    const message = await this.subAgentRunner.sendMessage(sessionId, content);
+    return {
+      summary: `Sent agent message to session ${sessionId}`,
+      data: {
+        id: message.id,
+        fromSessionId: message.fromSessionId,
+        toSessionId: message.toSessionId,
+        direction: message.direction,
+        createdAt: message.createdAt,
+        content: message.content,
       },
     };
   }

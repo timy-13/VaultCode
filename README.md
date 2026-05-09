@@ -15,6 +15,8 @@ Initial implementation of the agentic harness spec.
 - Structured terminal transcript rendering with provider, model, and workspace context
 - Optional TypeScript/JavaScript LSP tools for diagnostics, definitions, references, and completions
 - First isolated sub-agent delegation path via `spawn_agent`
+- Built-in agent registry and parent-side child-session inspection tools
+- Persisted parent/child message primitives for direct child sessions
 
 ## Commands
 ```bash
@@ -49,9 +51,12 @@ Default provider is `mock`.
 
 ## Sub-Agent Notes
 - Top-level sessions expose a `spawn_agent` tool for focused delegation.
+- Top-level sessions also expose `list_agent_types`, `list_agent_sessions`, `list_agent_messages`, and `send_agent_message`.
 - Child agents run in isolated saved sessions with their own message history and tool activity.
 - Child-agent results return to the parent only as structured tool output.
-- Child agents currently use the same configured provider/model as the parent and do not recursively expose `spawn_agent`.
+- Built-in agent types currently include `worker`, `explorer`, `reviewer`, and `general`.
+- Child agents currently use the same configured provider/model as the parent and do not recursively expose parent-only agent tools.
+- Parent/child notes are persisted on child sessions, including an automatic child-to-parent completion record after each delegated run.
 
 ## Tool Contract
 Each tool exposes:

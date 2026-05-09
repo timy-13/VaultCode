@@ -37,6 +37,15 @@ export interface ToolMessage extends MessageBase {
 
 export type SessionMessage = SystemMessage | UserMessage | AssistantMessage | ToolMessage;
 
+export interface AgentMessageRecord {
+  id: string;
+  fromSessionId: string;
+  toSessionId: string;
+  direction: "parent_to_child" | "child_to_parent";
+  createdAt: string;
+  content: string;
+}
+
 export interface Session {
   schemaVersion: number;
   id: string;
@@ -44,6 +53,7 @@ export interface Session {
   createdAt: string;
   updatedAt: string;
   messages: SessionMessage[];
+  agentMessages: AgentMessageRecord[];
   toolHistory: string[];
 }
 

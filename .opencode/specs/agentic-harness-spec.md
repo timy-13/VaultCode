@@ -49,6 +49,8 @@ Build a minimal, extensible CLI agentic harness for software engineering tasks, 
 - Cancellation is wired through the CLI, agent loop, and local tool adapter so aborted model requests and long-running tools surface as distinct cancelled outcomes instead of generic failures.
 - TypeScript LSP integration is optional and uses `typescript-language-server` over stdio when available; missing-server cases return structured actionable tool errors.
 - A first sub-agent delegation path exists through `spawn_agent`, which runs a child agent in an isolated saved session and returns only structured results to the parent.
+- Parent sessions can inspect built-in agent types and direct child sessions through `list_agent_types` and `list_agent_sessions`.
+- Parent sessions can inspect and write persisted direct child-session messages through `list_agent_messages` and `send_agent_message`.
 - Session persistence is JSON-based with schema versioning and stores full assistant tool calls and normalized tool results so resumed sessions preserve provider-relevant context.
 - `/stash` and `/branch` are implemented in the initial scaffold.
 - Current tests cover config/path resolution, session branching, provider message/tool mapping, and structured local tool behavior.
@@ -89,12 +91,16 @@ Implement minimal agentic loop with essential features:
 - Local tool adapter with the six core tools.
 - Local tool adapter now also exposes optional TypeScript/JavaScript LSP tools.
 - Top-level sessions now expose an initial `spawn_agent` tool for isolated task delegation.
+- Top-level sessions now also expose built-in agent discovery and direct child-session inspection tools.
+- Top-level sessions now expose persisted direct child-session message tools.
 - JSON session storage with schema versioning.
 - Slash commands for `/stash` and `/branch`.
 - Basic test coverage for the current scaffold.
 - Verified cancellation handling for provider aborts and long-running shell tools.
 - Verified structured LSP tool behavior with injected service tests and unavailable-server error handling.
 - Verified isolated sub-agent session persistence and structured parent-visible delegation results.
+- Verified built-in agent type validation and direct child-session listing.
+- Verified persisted parent/child message records and direct-child message validation.
 
 **Phase 1 Exclusions**
 - No multi-agent team lifecycle management yet
@@ -143,6 +149,8 @@ Add reusable, injectable skill modules:
 - The current tool adapter returns structured results instead of raw strings so later providers and persistence can reuse normalized tool state.
 - The current LSP implementation is a small stdio JSON-RPC client for `typescript-language-server` and currently reads on-disk file contents for each request instead of maintaining unsaved editor buffers.
 - The current sub-agent implementation reuses the configured provider/model, creates a child session with a parent session ID link, and keeps delegation one-way by returning only structured tool output to the parent.
+- The current agent registry is static and built-in, with `worker`, `explorer`, `reviewer`, and `general` as the initial agent types.
+- Parent/child message primitives are currently persisted on child sessions so delegated runs can record child-to-parent completion notes and parents can add follow-up notes without mutating the live parent session state.
 
 ## Session Model
 - A session has a stable session ID, creation timestamp, last-updated timestamp, schema version, and optional parent session ID for `/branch`.
@@ -156,6 +164,7 @@ Add reusable, injectable skill modules:
 - Tool messages persist the normalized tool result object.
 - Branching preserves only the retained tool-call history reachable from the selected branch point.
 - Child sub-agent sessions persist independently and are linked to the parent session through `parentSessionId`.
+- Child sessions also persist agent-message records for direct parent/child communication history.
 
 ## Affected Areas
 - Runtime evaluation and selection documentation
@@ -221,6 +230,9 @@ Status:
 
 Status:
 - A first `spawn_agent` delegation path is implemented for top-level sessions.
+- Built-in agent types can be listed and are validated before child execution starts.
+- Parent sessions can list their direct child sessions through a structured tool response.
+- Parent sessions can inspect child-session message history and append direct child notes through structured tools.
 - Child agents run in isolated saved sessions and return results to the parent only through structured tool output.
 - Agent registry, team lifecycle management, and multi-agent restore are not implemented yet.
 
@@ -235,6 +247,8 @@ Status:
 - Phase 2: integration tests against one real LSP server for at least one primary language.
 - Phase 2 current coverage: unit tests for LSP tool contracts and unavailable-server behavior; live server integration coverage is still pending.
 - Phase 3 current coverage: unit tests for isolated sub-agent session persistence and structured delegation results.
+- Phase 3 current coverage also includes agent-type validation and child-session listing.
+- Phase 3 current coverage also includes persisted parent/child message records and direct-child message validation.
 - Phase 3: broader integration tests still needed for spawn, messaging, shutdown, and restore.
 - Phase 4: fixture-based tests for skill discovery, loading, enable/disable behavior, and prompt injection.
 
