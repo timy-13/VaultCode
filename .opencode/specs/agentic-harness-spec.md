@@ -35,6 +35,7 @@ Build a minimal, extensible CLI agentic harness for software engineering tasks, 
 ## Current Implementation Snapshot
 - Runtime selected and scaffolded: TypeScript / Node.js.
 - Core CLI scaffold exists with a runnable agent loop, local session persistence, and slash command handling.
+- The CLI transcript now renders structured banner, prompt, assistant, and tool sections without requiring a full-screen TUI framework.
 - Implemented providers:
   - `mock` for fixed local end-to-end verification.
   - `openai` using the Chat Completions API.
@@ -43,7 +44,11 @@ Build a minimal, extensible CLI agentic harness for software engineering tasks, 
   - `openai` uses `OPENAI_API_KEY` and defaults to `gpt-4.1-mini` if no model is set.
   - `opencode` uses `OPENCODE_API_KEY` and requires an explicit model via CLI flag or config.
 - Implemented core tools: `read`, `write`, `edit`, `bash`, `glob`, `grep`.
+- Implemented LSP tools: `lsp_diagnostics`, `lsp_definition`, `lsp_references`, `lsp_completions` for TypeScript/JavaScript workspaces.
 - Tool definitions now expose structured input schemas and structured results (`summary`, optional `data`, normalized error object).
+- Cancellation is wired through the CLI, agent loop, and local tool adapter so aborted model requests and long-running tools surface as distinct cancelled outcomes instead of generic failures.
+- TypeScript LSP integration is optional and uses `typescript-language-server` over stdio when available; missing-server cases return structured actionable tool errors.
+- A first sub-agent delegation path exists through `spawn_agent`, which runs a child agent in an isolated saved session and returns only structured results to the parent.
 - Session persistence is JSON-based with schema versioning and stores full assistant tool calls and normalized tool results so resumed sessions preserve provider-relevant context.
 - `/stash` and `/branch` are implemented in the initial scaffold.
 - Current tests cover config/path resolution, session branching, provider message/tool mapping, and structured local tool behavior.
@@ -69,6 +74,7 @@ Compare top runtimes against project requirements, select optimal runtime before
 ### Phase 1: Bare-Bones Core (v0.1)
 Implement minimal agentic loop with essential features:
 1. CLI entry point with rich terminal UI (progress indicators, color-coded output, structured tool call display)
+   - Current implementation uses structured line-oriented rendering rather than a full-screen TUI.
 2. LLM client with provider adapter pattern (Anthropic Claude, OpenAI GPT, etc.)
 3. API key configuration system (env vars, config file, CLI flags)
 4. Core tool set exposed through the tool adapter: `read`, `write`, `edit`, `bash`, `glob`, `grep`
@@ -81,15 +87,21 @@ Implement minimal agentic loop with essential features:
 - TypeScript CLI scaffold with build/test scripts.
 - Provider adapter boundary with working `mock`, `openai`, and `opencode` providers.
 - Local tool adapter with the six core tools.
+- Local tool adapter now also exposes optional TypeScript/JavaScript LSP tools.
+- Top-level sessions now expose an initial `spawn_agent` tool for isolated task delegation.
 - JSON session storage with schema versioning.
 - Slash commands for `/stash` and `/branch`.
 - Basic test coverage for the current scaffold.
+- Verified cancellation handling for provider aborts and long-running shell tools.
+- Verified structured LSP tool behavior with injected service tests and unavailable-server error handling.
+- Verified isolated sub-agent session persistence and structured parent-visible delegation results.
 
 **Phase 1 Exclusions**
-- No sub-agents
+- No multi-agent team lifecycle management yet
 - No skills
 - No automatic LSP server management
 - No plugin marketplace or third-party extension loading
+- No in-memory document sync beyond reading current on-disk file contents before each LSP request
 
 ### Phase 2: LSP Integration (v0.2)
 Add Language Server Protocol support for code intelligence:
@@ -129,6 +141,8 @@ Add reusable, injectable skill modules:
 - The current provider implementations share OpenAI-compatible message/tool conversion helpers where possible.
 - The current `opencode` provider intentionally targets the OpenAI-compatible Zen route only; model-specific protocol switching like Pi's broader provider matrix is not yet implemented.
 - The current tool adapter returns structured results instead of raw strings so later providers and persistence can reuse normalized tool state.
+- The current LSP implementation is a small stdio JSON-RPC client for `typescript-language-server` and currently reads on-disk file contents for each request instead of maintaining unsaved editor buffers.
+- The current sub-agent implementation reuses the configured provider/model, creates a child session with a parent session ID link, and keeps delegation one-way by returning only structured tool output to the parent.
 
 ## Session Model
 - A session has a stable session ID, creation timestamp, last-updated timestamp, schema version, and optional parent session ID for `/branch`.
@@ -141,6 +155,7 @@ Add reusable, injectable skill modules:
 - Assistant messages persist full tool-call objects, not only tool-call IDs.
 - Tool messages persist the normalized tool result object.
 - Branching preserves only the retained tool-call history reachable from the selected branch point.
+- Child sub-agent sessions persist independently and are linked to the parent session through `parentSessionId`.
 
 ## Affected Areas
 - Runtime evaluation and selection documentation
@@ -181,6 +196,8 @@ Status:
 Status:
 - A scaffolded implementation exists for all of the above items.
 - Verification currently includes local end-to-end runs with the `mock` provider and unit tests around session branching, provider conversion helpers, and structured tool execution.
+- Verification currently includes cancellation tests for provider aborts and long-running shell commands.
+- Structured transcript rendering is implemented, but not yet as a full-screen interactive TUI.
 - Real-provider coverage currently exists for `openai` and `opencode`, but live network verification depends on external credentials.
 
 ### Phase 2 (LSP Integration)
@@ -189,12 +206,23 @@ Status:
 - [ ] Agent uses LSP tools to validate code changes during task execution
 - [ ] LSP results stay consistent with harness-managed in-session file edits
 
+Status:
+- Initial TypeScript/JavaScript LSP support is scaffolded via `typescript-language-server` over stdio.
+- Four agent-callable LSP tools are implemented: diagnostics, definitions, references, and completions.
+- Graceful unavailable-server behavior is implemented.
+- Unsaved in-memory document synchronization is not implemented yet; requests currently read the latest on-disk file contents.
+
 ### Phase 3 (Agent System)
 - [ ] Spawns sub-agents with isolated contexts and independent session persistence
 - [ ] Inter-agent messaging works for task delegation and result passing
 - [ ] Team shutdown and cleanup functions correctly without orphaned processes
 - [ ] Multi-agent team state saves and restores across CLI sessions
 - [ ] Sub-agent outputs only affect parent sessions through explicit returned results or messages
+
+Status:
+- A first `spawn_agent` delegation path is implemented for top-level sessions.
+- Child agents run in isolated saved sessions and return results to the parent only through structured tool output.
+- Agent registry, team lifecycle management, and multi-agent restore are not implemented yet.
 
 ### Phase 4 (Skill System)
 - [ ] Loads skills from `~/.config/opencode/harness/skills/` and project-level `.opencode/skills/`
@@ -205,7 +233,9 @@ Status:
 ## Verification Strategy
 - Phase 1: smoke tests for config loading, one end-to-end tool call task, session save/restore, slash commands, and cancellation.
 - Phase 2: integration tests against one real LSP server for at least one primary language.
-- Phase 3: integration tests covering sub-agent spawn, messaging, shutdown, and restore.
+- Phase 2 current coverage: unit tests for LSP tool contracts and unavailable-server behavior; live server integration coverage is still pending.
+- Phase 3 current coverage: unit tests for isolated sub-agent session persistence and structured delegation results.
+- Phase 3: broader integration tests still needed for spawn, messaging, shutdown, and restore.
 - Phase 4: fixture-based tests for skill discovery, loading, enable/disable behavior, and prompt injection.
 
 ## Out of Scope / Open Questions

@@ -37,6 +37,7 @@ export interface ToolResult {
   callId: string;
   name: string;
   ok: boolean;
+  cancelled?: boolean;
   summary: string;
   data?: JsonValue;
   error?: {
@@ -47,11 +48,13 @@ export interface ToolResult {
 export interface ToolExecutionRecord {
   callId: string;
   name: string;
-  status: "success" | "error";
+  status: "success" | "error" | "cancelled";
   durationMs: number;
+  summary: string;
 }
 
 export interface ToolAdapter {
   listTools(): ToolDefinition[];
   executeTool(call: ToolCall, signal: AbortSignal): Promise<ToolResult>;
+  dispose?(): Promise<void>;
 }

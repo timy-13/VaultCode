@@ -1,6 +1,8 @@
 import { runAgentLoop } from "../agent/loop.js";
+import { LocalSubAgentRunner } from "../agent/sub-agent.js";
 import { loadConfig } from "../config/config.js";
 import { createProvider } from "../provider/factory.js";
+import { getAbortMessage, isAbortError, OperationCancelledError } from "../runtime/abort.js";
 import { createUserMessage } from "../session/messages.js";
 import { createSession, ensureStorage, loadSession, saveSession } from "../session/store.js";
 import { LocalToolAdapter } from "../tools/local-tools.js";
@@ -14,34 +16,57 @@ export async function runPrompt(args: CliArgs, workspaceRoot: string): Promise<v
   const config = await loadConfig({ provider: args.provider, model: args.model });
   const session = args.resumeSessionId ? await loadSession(args.resumeSessionId) : createSession();
   const provider = createProvider(config);
-  const toolAdapter = new LocalToolAdapter(workspaceRoot);
+  const subAgentRunner = new LocalSubAgentRunner({
+    workspaceRoot,
+    provider,
+    model: config.model,
+    parentSessionId: session.id,
+    createToolAdapter: () => new LocalToolAdapter(workspaceRoot),
+  });
+  const toolAdapter = new LocalToolAdapter(workspaceRoot, { subAgentRunner });
 
-  renderBanner(session);
+  renderBanner(session, {
+    provider: config.provider,
+    model: config.model,
+    workspaceRoot,
+  });
 
   if (await maybeHandleSlashCommand(args.prompt, session)) {
     return;
   }
 
   const controller = new AbortController();
-  process.once("SIGINT", () => {
-    controller.abort(new Error("Cancelled by user."));
+  const onSigint = () => {
+    controller.abort(new OperationCancelledError("Cancelled by user."));
     renderInfo("Cancellation requested.");
-  });
+  };
+  process.once("SIGINT", onSigint);
 
   renderUserPrompt(args.prompt);
   session.messages.push(createUserMessage(args.prompt));
 
   try {
-    await runAgentLoop(
-      session,
-      provider,
-      toolAdapter,
-      config.model,
-      renderAssistantMessage,
-      renderToolExecution,
-      controller.signal,
-    );
+    try {
+      await runAgentLoop(
+        session,
+        provider,
+        toolAdapter,
+        config.model,
+        renderAssistantMessage,
+        renderToolExecution,
+        controller.signal,
+      );
+    } catch (error) {
+      if (isAbortError(error) || controller.signal.aborted) {
+        renderInfo(getAbortMessage(error, "Cancelled by user."));
+        return;
+      }
+
+      throw error;
+    }
   } finally {
+    process.removeListener("SIGINT", onSigint);
+    await toolAdapter.dispose?.();
     await saveSession(session);
   }
 }

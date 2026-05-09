@@ -1,6 +1,7 @@
 import { createAssistantMessage, createToolMessage } from "../session/messages.js";
 import type { Session } from "../session/types.js";
 import type { ProviderAdapter } from "../provider/types.js";
+import { toAbortError } from "../runtime/abort.js";
 import type { ToolAdapter, ToolExecutionRecord, ToolResult } from "../tools/types.js";
 
 export interface AgentLoopResult {
@@ -46,14 +47,19 @@ export async function runAgentLoop(
       const record: ToolExecutionRecord = {
         callId: call.id,
         name: call.name,
-        status: result.ok ? "success" : "error",
+        status: result.cancelled ? "cancelled" : result.ok ? "success" : "error",
         durationMs: Date.now() - startedAt,
+        summary: result.summary,
       };
       records.push(record);
       session.toolHistory.push(call.id);
       session.messages.push(createToolMessage(result));
       onToolRecord(record);
       results.push(result);
+
+      if (result.cancelled) {
+        throw toAbortError(signal, result.error?.message);
+      }
     }
 
     response = await provider.continueWithTools(

@@ -11,6 +11,10 @@ Initial implementation of the agentic harness spec.
 - Mock provider for local development
 - OpenAI provider adapter using the Chat Completions API
 - Structured tool schemas and structured tool results
+- First-class cancellation handling for model requests and long-running tools
+- Structured terminal transcript rendering with provider, model, and workspace context
+- Optional TypeScript/JavaScript LSP tools for diagnostics, definitions, references, and completions
+- First isolated sub-agent delegation path via `spawn_agent`
 
 ## Commands
 ```bash
@@ -37,8 +41,20 @@ Default provider is `mock`.
 - `opencode` requires `OPENCODE_API_KEY` and a required model via `--model` or `TIMCODE_MODEL`. It uses the OpenAI-compatible Zen endpoint at `https://opencode.ai/zen/v1` by default.
 - `anthropic` is still unimplemented.
 
+## LSP Notes
+- The harness exposes `lsp_diagnostics`, `lsp_definition`, `lsp_references`, and `lsp_completions` for TypeScript/JavaScript files.
+- These tools use `typescript-language-server` over stdio when available.
+- Missing-server cases return a structured actionable tool error instead of crashing the session.
+- Override the launch command with `TIMCODE_TYPESCRIPT_LSP_COMMAND` if needed.
+
+## Sub-Agent Notes
+- Top-level sessions expose a `spawn_agent` tool for focused delegation.
+- Child agents run in isolated saved sessions with their own message history and tool activity.
+- Child-agent results return to the parent only as structured tool output.
+- Child agents currently use the same configured provider/model as the parent and do not recursively expose `spawn_agent`.
+
 ## Tool Contract
 Each tool exposes:
 - a name and description
 - a JSON-schema-like input contract
-- a structured result with `summary`, optional `data`, and normalized errors
+- a structured result with `summary`, optional `data`, normalized errors, and a distinct cancelled outcome when execution is aborted

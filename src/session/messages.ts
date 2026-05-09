@@ -1,7 +1,16 @@
 import crypto from "node:crypto";
 
 import type { ToolCall, ToolResult } from "../tools/types.js";
-import type { AssistantMessage, ToolMessage, UserMessage } from "./types.js";
+import type { AssistantMessage, SystemMessage, ToolMessage, UserMessage } from "./types.js";
+
+export function createSystemMessage(content: string): SystemMessage {
+  return {
+    id: crypto.randomUUID(),
+    role: "system",
+    timestamp: new Date().toISOString(),
+    content,
+  };
+}
 
 export function createUserMessage(content: string): UserMessage {
   return {
@@ -30,7 +39,7 @@ export function createToolMessage(result: ToolResult): ToolMessage {
     toolCallId: result.callId,
     toolName: result.name,
     content: result.summary,
-    status: result.ok ? "success" : "error",
+    status: result.cancelled ? "cancelled" : result.ok ? "success" : "error",
     result,
   };
 }

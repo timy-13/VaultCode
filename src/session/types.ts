@@ -31,7 +31,7 @@ export interface ToolMessage extends MessageBase {
   content: string;
   toolName: string;
   toolCallId: string;
-  status: "success" | "error";
+  status: "success" | "error" | "cancelled";
   result: ToolResult;
 }
 
