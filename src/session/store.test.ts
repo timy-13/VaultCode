@@ -5,7 +5,20 @@ import path from "node:path";
 import test from "node:test";
 
 import { createAssistantMessage, createUserMessage } from "./messages.js";
-import { appendAgentMessage, branchSession, createSession, getTeamStatus, listAgentMessages, listChildSessions, saveSession, updateSessionLifecycle } from "./store.js";
+import {
+  appendAgentMessage,
+  branchSession,
+  createSession,
+  getSessionTree,
+  getTeamStatus,
+  isSameSessionTree,
+  listAgentMessages,
+  listChildSessions,
+  restoreSessionToMessage,
+  saveSession,
+  saveSessionWithOptions,
+  updateSessionLifecycle,
+} from "./store.js";
 
 test("branchSession keeps history through the selected message", () => {
   const session = createSession();
@@ -23,6 +36,68 @@ test("branchSession keeps history through the selected message", () => {
     [first.id, second.id],
   );
   assert.deepEqual(branch.toolHistory, ["tool-1"]);
+});
+
+test("restoreSessionToMessage truncates history through the selected message", () => {
+  const session = createSession();
+  const first = createUserMessage("one");
+  const second = createAssistantMessage("two", [{ id: "tool-1", name: "write", input: { path: "a.txt" } }]);
+  const third = createUserMessage("three");
+  session.messages.push(first, second, third);
+  session.toolHistory.push("tool-1", "tool-2");
+
+  restoreSessionToMessage(session, second.id);
+
+  assert.deepEqual(
+    session.messages.map((message) => message.id),
+    [first.id, second.id],
+  );
+  assert.deepEqual(session.toolHistory, ["tool-1"]);
+});
+
+test("saveSessionWithOptions allows persisted session truncation", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "timcode-session-store-"));
+  const originalDataDir = process.env.TIMCODE_DATA_DIR;
+  const originalConfigDir = process.env.TIMCODE_CONFIG_DIR;
+
+  process.env.TIMCODE_DATA_DIR = dataDir;
+  process.env.TIMCODE_CONFIG_DIR = dataDir;
+
+  try {
+    const session = createSession();
+    const first = createUserMessage("one");
+    const second = createAssistantMessage("two", [{ id: "tool-1", name: "write", input: { path: "a.txt" } }]);
+    const third = createUserMessage("three");
+    session.messages.push(first, second, third);
+    session.toolHistory.push("tool-1", "tool-2");
+    await saveSession(session);
+
+    restoreSessionToMessage(session, second.id);
+    await saveSessionWithOptions(session, { allowTruncate: true });
+
+    const persisted = JSON.parse(
+      await fs.readFile(path.join(dataDir, "sessions", `${session.id}.json`), "utf8"),
+    ) as { messages: Array<{ id: string }>; toolHistory: string[] };
+    assert.deepEqual(
+      persisted.messages.map((message) => message.id),
+      [first.id, second.id],
+    );
+    assert.deepEqual(persisted.toolHistory, ["tool-1"]);
+  } finally {
+    if (originalDataDir === undefined) {
+      delete process.env.TIMCODE_DATA_DIR;
+    } else {
+      process.env.TIMCODE_DATA_DIR = originalDataDir;
+    }
+
+    if (originalConfigDir === undefined) {
+      delete process.env.TIMCODE_CONFIG_DIR;
+    } else {
+      process.env.TIMCODE_CONFIG_DIR = originalConfigDir;
+    }
+
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
 });
 
 test("listChildSessions returns direct child summaries sorted by update time", async () => {
@@ -57,6 +132,7 @@ test("listChildSessions returns direct child summaries sorted by update time", a
     const summaries = await listChildSessions("parent-1");
     assert.equal(summaries.length, 2);
     assert.equal(summaries[0]?.id, childTwo.id);
+    assert.equal(summaries[0]?.depth, 1);
     assert.equal(summaries[0]?.lastAssistantText, "newer result");
     assert.equal(summaries[1]?.id, childOne.id);
     assert.equal(summaries[1]?.messageCount, 1);
@@ -138,12 +214,79 @@ test("getTeamStatus aggregates parent and child lifecycle counts", async () => {
 
     const status = await getTeamStatus(parent.id);
     assert.equal(status.totalSessions, 3);
+    assert.equal(status.rootSessionId, parent.id);
+    assert.equal(status.focusSessionId, parent.id);
     assert.deepEqual(status.counts, {
       running: 1,
       shutdown_requested: 1,
       completed: 1,
       cleaned_up: 0,
     });
+  } finally {
+    if (originalDataDir === undefined) {
+      delete process.env.TIMCODE_DATA_DIR;
+    } else {
+      process.env.TIMCODE_DATA_DIR = originalDataDir;
+    }
+
+    if (originalConfigDir === undefined) {
+      delete process.env.TIMCODE_CONFIG_DIR;
+    } else {
+      process.env.TIMCODE_CONFIG_DIR = originalConfigDir;
+    }
+
+    await fs.rm(dataDir, { recursive: true, force: true });
+  }
+});
+
+test("recursive team traversal restores the full session tree from any node", async () => {
+  const dataDir = await fs.mkdtemp(path.join(os.tmpdir(), "timcode-session-store-"));
+  const originalDataDir = process.env.TIMCODE_DATA_DIR;
+  const originalConfigDir = process.env.TIMCODE_CONFIG_DIR;
+
+  process.env.TIMCODE_DATA_DIR = dataDir;
+  process.env.TIMCODE_CONFIG_DIR = dataDir;
+
+  try {
+    const root = createSession();
+    const child = createSession(root.id);
+    const grandchild = createSession(child.id);
+    const cousin = createSession(root.id);
+    await saveSession(root);
+    await saveSession(child);
+    await saveSession(grandchild);
+    await saveSession(cousin);
+
+    const descendants = await listChildSessions(root.id, { recursive: true });
+    assert.deepEqual(
+      descendants
+        .map((session) => [session.id, session.depth] as const)
+        .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+      [
+        [child.id, 1],
+        [cousin.id, 1],
+        [grandchild.id, 2],
+      ].sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+    );
+
+    const tree = await getSessionTree(grandchild.id);
+    assert.deepEqual(
+      tree
+        .map((session) => [session.id, session.depth] as const)
+        .sort((left, right) => Number(left[1]) - Number(right[1]) || String(left[0]).localeCompare(String(right[0]))),
+      [
+        [root.id, 0],
+        [child.id, 1],
+        [cousin.id, 1],
+        [grandchild.id, 2],
+      ].sort((left, right) => Number(left[1]) - Number(right[1]) || String(left[0]).localeCompare(String(right[0]))),
+    );
+
+    const status = await getTeamStatus(grandchild.id, { recursive: true });
+    assert.equal(status.rootSessionId, root.id);
+    assert.equal(status.focusSessionId, grandchild.id);
+    assert.equal(status.totalSessions, 4);
+    assert.equal(await isSameSessionTree(grandchild.id, cousin.id), true);
   } finally {
     if (originalDataDir === undefined) {
       delete process.env.TIMCODE_DATA_DIR;

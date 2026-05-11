@@ -6,7 +6,7 @@ Initial implementation of the agentic harness spec.
 - TypeScript/Node.js scaffold
 - Provider and tool adapter boundaries
 - Local JSON session persistence with schema versioning
-- Slash command support for `/stash` and `/branch`
+- Slash command support for `/stash`, interactive `/branch`, `/branch fork`, and `/branch restore`
 - Built-in local tools: `read`, `write`, `edit`, `bash`, `glob`, `grep`
 - Mock provider for local development
 - OpenAI provider adapter using the Chat Completions API
@@ -17,7 +17,8 @@ Initial implementation of the agentic harness spec.
 - First isolated sub-agent delegation path via `spawn_agent`
 - Built-in agent registry and parent-side child-session inspection tools
 - Persisted parent/child message primitives for direct child sessions
-- Direct-team lifecycle state, status aggregation, shutdown requests, and cleanup markers
+- Recursive agent-tree restore/status traversal, tree-wide messaging, and live shutdown execution for active child runs
+- Filesystem-backed skill discovery, loading, and prompt injection with bundled starter skills
 
 ## Commands
 ```bash
@@ -27,7 +28,11 @@ node dist/index.js "create a hello.py file"
 OPENAI_API_KEY=... node dist/index.js --provider openai "create a hello.py file"
 OPENCODE_API_KEY=... node dist/index.js --provider opencode --model <model-id> "create a hello.py file"
 node dist/index.js /stash save greeting "Always explain test failures first"
-node dist/index.js --resume <session-id> /branch <message-id>
+node dist/index.js --resume <session-id> /branch fork <message-id>
+node dist/index.js --resume <session-id> /branch restore <message-id>
+node dist/index.js --resume <session-id> /branch
+node dist/index.js /skills list
+node dist/index.js /skills enable brainstorming
 ```
 
 ## Configuration
@@ -52,13 +57,27 @@ Default provider is `mock`.
 
 ## Sub-Agent Notes
 - Top-level sessions expose a `spawn_agent` tool for focused delegation.
-- Top-level sessions also expose `list_agent_types`, `list_agent_sessions`, `team_status`, `list_agent_messages`, `send_agent_message`, `request_agent_shutdown`, and `cleanup_agent_session`.
+- Top-level sessions also expose `list_agent_types`, `list_agent_sessions`, `list_active_agent_runs`, `team_status`, `list_agent_messages`, `send_agent_message`, `broadcast_agent_message`, `request_agent_shutdown`, `cleanup_agent_session`, `list_skills`, and `load_skill`.
 - Child agents run in isolated saved sessions with their own message history and tool activity.
 - Child-agent results return to the parent only as structured tool output.
 - Built-in agent types currently include `worker`, `explorer`, `reviewer`, and `general`.
-- Child agents currently use the same configured provider/model as the parent and do not recursively expose parent-only agent tools.
+- Child agents now use the same configured provider/model as the parent and can recursively spawn additional child agents.
 - Parent/child notes are persisted on child sessions, including an automatic child-to-parent completion record after each delegated run.
-- Sessions now persist lifecycle state (`running`, `shutdown_requested`, `completed`, `cleaned_up`) so direct-team status can be aggregated.
+- Sessions persist lifecycle state (`running`, `shutdown_requested`, `completed`, `cleaned_up`) so both direct-team and restored tree status can be aggregated.
+- `list_agent_sessions` and `team_status` accept optional recursive traversal so a resumed descendant session can reconstruct the full tree rooted above it.
+- `send_agent_message` can target any related session in the same tree, and `request_agent_shutdown` now aborts active runs instead of only writing lifecycle markers.
+- `list_active_agent_runs` exposes the live in-memory run registry for a session or subtree, and `broadcast_agent_message` can fan a note out across a subtree in one call.
+- `cleanup_agent_session` now also accepts recursive cleanup for full descendant subtrees.
+
+## Skill Notes
+- Skills are discovered from `~/.config/opencode/harness/skills/` and project-level `.opencode/skills/`.
+- Each skill lives in its own directory with a `SKILL.md` entry file and optional sibling resources.
+- Enabled skills are injected into parent and child agent system prompts at runtime.
+- The tool adapter exposes `list_skills` and `load_skill` so agents can discover and load reusable skill instructions explicitly.
+- Bundled starter skills currently include `brainstorming`, `mermaid-validation`, `code-review`, and `context-vault`.
+- Persistent skill management is available through `/skills list`, `/skills enabled`, `/skills show <name>`, `/skills enable <name>`, and `/skills disable <name>`.
+- Enabling a skill now persists any required dependencies automatically, and disabling a skill is blocked while another enabled skill still depends on it.
+- Skill discovery now exposes each skill's `entryFilePath`, sibling `resourcePaths`, and `metadataWarnings` so malformed or partial skill definitions are visible instead of silently normalized.
 
 ## Tool Contract
 Each tool exposes:
