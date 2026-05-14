@@ -7,6 +7,8 @@ import type { SubAgentRunner } from "../agent/sub-agent.js";
 import { TypeScriptLspService } from "../lsp/typescript-service.js";
 import type { LspCompletionItem, LspDiagnostic, LspLocation, WorkspaceLspService } from "../lsp/types.js";
 import { getAbortMessage, isAbortError } from "../runtime/abort.js";
+import type { Session } from "../session/types.js";
+import { discoverSkills, loadSkill, readSkillResource } from "../skills/loader.js";
 import type { JsonValue, ToolAdapter, ToolCall, ToolDefinition, ToolResult } from "./types.js";
 
 const execAsync = promisify(exec);
@@ -14,16 +16,19 @@ const execAsync = promisify(exec);
 export class LocalToolAdapter implements ToolAdapter {
   private lspService?: WorkspaceLspService;
   private readonly subAgentRunner?: SubAgentRunner;
+  private readonly session?: Session;
 
   constructor(
     private readonly workspaceRoot: string,
     options?: {
       lspService?: WorkspaceLspService;
       subAgentRunner?: SubAgentRunner;
+      session?: Session;
     },
   ) {
     this.lspService = options?.lspService;
     this.subAgentRunner = options?.subAgentRunner;
+    this.session = options?.session;
   }
 
   listTools(): ToolDefinition[] {
@@ -70,6 +75,32 @@ export class LocalToolAdapter implements ToolAdapter {
         name: "grep",
         description: "Search workspace files with a regular expression",
         inputSchema: objectSchema({ pattern: stringField("Regular expression pattern") }, ["pattern"]),
+      },
+      {
+        name: "list_skills",
+        description: "List available reusable skills from global and project skill directories",
+        inputSchema: objectSchema({}, []),
+      },
+      {
+        name: "load_skill",
+        description: "Load a reusable skill's instructions and metadata",
+        inputSchema: objectSchema({ name: stringField("Skill name") }, ["name"]),
+      },
+      {
+        name: "current_skills",
+        description: "List the skills currently loaded into this session's prompt context",
+        inputSchema: objectSchema({}, []),
+      },
+      {
+        name: "read_skill_resource",
+        description: "Read a bundled resource file from a skill directory",
+        inputSchema: objectSchema(
+          {
+            name: stringField("Skill name"),
+            resourcePath: stringField("Skill-relative resource path"),
+          },
+          ["name", "resourcePath"],
+        ),
       },
       {
         name: "lsp_diagnostics",
@@ -122,39 +153,75 @@ export class LocalToolAdapter implements ToolAdapter {
             },
             {
               name: "list_agent_sessions",
-              description: "List direct child agent sessions spawned from the current parent session",
-              inputSchema: objectSchema({}, []),
+              description: "List child agent sessions for the current session, optionally including the full descendant tree",
+              inputSchema: objectSchema({ recursive: booleanField("Whether to include all descendant sessions") }, []),
+            },
+            {
+              name: "list_active_agent_runs",
+              description: "List live active agent runs for a session or subtree",
+              inputSchema: objectSchema(
+                {
+                  sessionId: stringField("Optional related session ID to inspect"),
+                  recursive: booleanField("Whether to include descendant runs for the target session"),
+                },
+                [],
+              ),
             },
             {
               name: "team_status",
-              description: "Show aggregate lifecycle status for the parent session and its direct child agent sessions",
-              inputSchema: objectSchema({}, []),
+              description: "Show aggregate lifecycle status for the current session or the full restored session tree",
+              inputSchema: objectSchema({ recursive: booleanField("Whether to aggregate the full restored session tree") }, []),
             },
             {
               name: "list_agent_messages",
-              description: "List persisted parent/child messages for a direct child agent session",
+              description: "List persisted agent messages for a related session in the same session tree",
               inputSchema: objectSchema({ sessionId: stringField("Direct child session ID") }, ["sessionId"]),
             },
             {
               name: "send_agent_message",
-              description: "Send a note from the current parent session to a direct child agent session",
+              description: "Send a note from the current session to another related session in the same tree",
               inputSchema: objectSchema(
                 {
-                  sessionId: stringField("Direct child session ID"),
+                  sessionId: stringField("Related session ID"),
                   content: stringField("Message content to send to the child session"),
                 },
                 ["sessionId", "content"],
               ),
             },
             {
+              name: "broadcast_agent_message",
+              description: "Broadcast a note to a related session and optionally its descendants",
+              inputSchema: objectSchema(
+                {
+                  content: stringField("Message content to broadcast"),
+                  sessionId: stringField("Optional related session ID to target"),
+                  recursive: booleanField("Whether to include descendant sessions of the target"),
+                  includeSelf: booleanField("Whether to include the target session itself when it is the current session"),
+                },
+                ["content"],
+              ),
+            },
+            {
               name: "request_agent_shutdown",
-              description: "Mark a direct child agent session as shutdown requested",
-              inputSchema: objectSchema({ sessionId: stringField("Direct child session ID") }, ["sessionId"]),
+              description: "Request shutdown for a related session, optionally including its full descendant subtree",
+              inputSchema: objectSchema(
+                {
+                  sessionId: stringField("Related session ID"),
+                  recursive: booleanField("Whether to include the session's descendant subtree"),
+                },
+                ["sessionId"],
+              ),
             },
             {
               name: "cleanup_agent_session",
-              description: "Mark a direct child agent session as cleaned up",
-              inputSchema: objectSchema({ sessionId: stringField("Direct child session ID") }, ["sessionId"]),
+              description: "Mark a related session as cleaned up after shutdown or completion",
+              inputSchema: objectSchema(
+                {
+                  sessionId: stringField("Direct child session ID"),
+                  recursive: booleanField("Whether to include the session's descendant subtree"),
+                },
+                ["sessionId"],
+              ),
             },
             {
               name: "spawn_agent",
@@ -224,6 +291,14 @@ export class LocalToolAdapter implements ToolAdapter {
         return this.glob(expectString(call.input.pattern, "pattern"));
       case "grep":
         return this.grep(expectString(call.input.pattern, "pattern"));
+      case "list_skills":
+        return this.listSkills();
+      case "load_skill":
+        return this.loadSkill(expectString(call.input.name, "name"));
+      case "current_skills":
+        return this.currentSkills();
+      case "read_skill_resource":
+        return this.readSkillResource(expectString(call.input.name, "name"), expectString(call.input.resourcePath, "resourcePath"));
       case "lsp_diagnostics":
         return this.lspDiagnostics(expectString(call.input.path, "path"), signal);
       case "lsp_definition":
@@ -253,17 +328,26 @@ export class LocalToolAdapter implements ToolAdapter {
       case "list_agent_types":
         return this.listAgentTypes();
       case "list_agent_sessions":
-        return this.listAgentSessions();
+        return this.listAgentSessions(expectOptionalBoolean(call.input.recursive) ?? false);
+      case "list_active_agent_runs":
+        return this.listActiveAgentRuns(expectOptionalString(call.input.sessionId), expectOptionalBoolean(call.input.recursive) ?? true);
       case "team_status":
-        return this.teamStatus();
+        return this.teamStatus(expectOptionalBoolean(call.input.recursive) ?? true);
       case "list_agent_messages":
         return this.listAgentMessages(expectString(call.input.sessionId, "sessionId"));
       case "send_agent_message":
         return this.sendAgentMessage(expectString(call.input.sessionId, "sessionId"), expectString(call.input.content, "content"));
+      case "broadcast_agent_message":
+        return this.broadcastAgentMessage(
+          expectString(call.input.content, "content"),
+          expectOptionalString(call.input.sessionId),
+          expectOptionalBoolean(call.input.recursive) ?? true,
+          expectOptionalBoolean(call.input.includeSelf) ?? false,
+        );
       case "request_agent_shutdown":
-        return this.requestAgentShutdown(expectString(call.input.sessionId, "sessionId"));
+        return this.requestAgentShutdown(expectString(call.input.sessionId, "sessionId"), expectOptionalBoolean(call.input.recursive) ?? false);
       case "cleanup_agent_session":
-        return this.cleanupAgentSession(expectString(call.input.sessionId, "sessionId"));
+        return this.cleanupAgentSession(expectString(call.input.sessionId, "sessionId"), expectOptionalBoolean(call.input.recursive) ?? false);
       default:
         throw new Error(`Unknown tool: ${call.name}`);
     }
@@ -361,6 +445,83 @@ export class LocalToolAdapter implements ToolAdapter {
     };
   }
 
+  private async listSkills(): Promise<{ summary: string; data: JsonValue }> {
+    const skills = await discoverSkills(this.workspaceRoot);
+    return {
+      summary: `Found ${skills.length} skill(s)`,
+      data: {
+        skills: skills.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          dependencies: skill.dependencies,
+          source: skill.source,
+          directoryPath: skill.directoryPath,
+          entryFilePath: skill.entryFilePath,
+          resourcePaths: skill.resourcePaths,
+          metadataWarnings: skill.metadataWarnings,
+        })),
+      },
+    };
+  }
+
+  private async loadSkill(name: string): Promise<{ summary: string; data: JsonValue }> {
+    const skill = await loadSkill(this.workspaceRoot, name);
+    return {
+      summary: `Loaded skill ${name}`,
+      data: {
+        name: skill.name,
+        description: skill.description,
+        dependencies: skill.dependencies,
+        source: skill.source,
+        directoryPath: skill.directoryPath,
+        entryFilePath: skill.entryFilePath,
+        resourcePaths: skill.resourcePaths,
+        metadataWarnings: skill.metadataWarnings,
+        content: skill.content,
+      },
+    };
+  }
+
+  private async currentSkills(): Promise<{ summary: string; data: JsonValue }> {
+    const skills = this.session?.loadedSkills ?? [];
+    return {
+      summary: `Loaded ${skills.length} current skill(s)`,
+      data: {
+        skills: skills.map((skill) => ({
+          name: skill.name,
+          description: skill.description,
+          dependencies: skill.dependencies,
+          source: skill.source,
+          directoryPath: skill.directoryPath,
+          entryFilePath: skill.entryFilePath,
+          resourcePaths: skill.resourcePaths,
+          metadataWarnings: skill.metadataWarnings,
+        })),
+      },
+    };
+  }
+
+  private async readSkillResource(name: string, resourcePath: string): Promise<{ summary: string; data: JsonValue }> {
+    const resource = await readSkillResource(this.workspaceRoot, name, resourcePath);
+    return {
+      summary: `Read skill resource ${resource.resourcePath} from ${name}`,
+      data: {
+        skill: {
+          name: resource.skill.name,
+          description: resource.skill.description,
+          dependencies: resource.skill.dependencies,
+          source: resource.skill.source,
+          directoryPath: resource.skill.directoryPath,
+          entryFilePath: resource.skill.entryFilePath,
+          resourcePaths: resource.skill.resourcePaths,
+          metadataWarnings: resource.skill.metadataWarnings,
+        },
+        resourcePath: resource.resourcePath,
+        content: resource.content,
+      },
+    };
+  }
+
   private async lspDiagnostics(filePath: string, signal: AbortSignal): Promise<{ summary: string; data: JsonValue }> {
     const diagnostics = await this.getLspService().getDiagnostics(filePath, signal);
     return {
@@ -450,18 +611,20 @@ export class LocalToolAdapter implements ToolAdapter {
     };
   }
 
-  private async listAgentSessions(): Promise<{ summary: string; data: JsonValue }> {
+  private async listAgentSessions(recursive: boolean): Promise<{ summary: string; data: JsonValue }> {
     if (!this.subAgentRunner) {
       throw new Error("Sub-agent runner is not configured for this session.");
     }
 
-    const sessions = await this.subAgentRunner.listChildSessions();
+    const sessions = await this.subAgentRunner.listChildSessions({ recursive });
     return {
-      summary: `Found ${sessions.length} child agent session(s)`,
+      summary: `Found ${sessions.length} ${recursive ? "related descendant" : "child"} agent session(s)`,
       data: {
+        recursive,
         sessions: sessions.map((session) => ({
           id: session.id,
           parentSessionId: session.parentSessionId ?? null,
+          depth: session.depth,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
           lifecycleState: session.lifecycleState,
@@ -472,28 +635,53 @@ export class LocalToolAdapter implements ToolAdapter {
     };
   }
 
-  private async teamStatus(): Promise<{ summary: string; data: JsonValue }> {
+  private async listActiveAgentRuns(sessionId: string | undefined, recursive: boolean): Promise<{ summary: string; data: JsonValue }> {
     if (!this.subAgentRunner) {
       throw new Error("Sub-agent runner is not configured for this session.");
     }
 
-    const status = await this.subAgentRunner.getTeamStatus();
+    const runs = await this.subAgentRunner.listActiveRuns({ sessionId, recursive });
+    return {
+      summary: `Found ${runs.length} active agent run(s)`,
+      data: {
+        sessionId: sessionId ?? null,
+        recursive,
+        runs: runs.map((run) => ({
+          sessionId: run.sessionId,
+          parentSessionId: run.parentSessionId ?? null,
+          agentType: run.agentType,
+          startedAt: run.startedAt,
+        })),
+      },
+    };
+  }
+
+  private async teamStatus(recursive: boolean): Promise<{ summary: string; data: JsonValue }> {
+    if (!this.subAgentRunner) {
+      throw new Error("Sub-agent runner is not configured for this session.");
+    }
+
+    const status = await this.subAgentRunner.getTeamStatus({ recursive });
     if (!status) {
       return {
         summary: "No team status is available for this session",
-        data: { sessions: [] },
+        data: { recursive, sessions: [] },
       };
     }
 
     return {
-      summary: `Found ${status.totalSessions} session(s) in the direct team`,
+      summary: `Found ${status.totalSessions} session(s) in the ${recursive ? "restored session tree" : "direct team"}`,
       data: {
+        recursive,
+        rootSessionId: status.rootSessionId,
+        focusSessionId: status.focusSessionId,
         parentSessionId: status.parentSessionId,
         totalSessions: status.totalSessions,
         counts: status.counts,
         sessions: status.sessions.map((session) => ({
           id: session.id,
           parentSessionId: session.parentSessionId ?? null,
+          depth: session.depth,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,
           lifecycleState: session.lifecycleState,
@@ -545,32 +733,63 @@ export class LocalToolAdapter implements ToolAdapter {
     };
   }
 
-  private async requestAgentShutdown(sessionId: string): Promise<{ summary: string; data: JsonValue }> {
+  private async broadcastAgentMessage(
+    content: string,
+    sessionId: string | undefined,
+    recursive: boolean,
+    includeSelf: boolean,
+  ): Promise<{ summary: string; data: JsonValue }> {
     if (!this.subAgentRunner) {
       throw new Error("Sub-agent runner is not configured for this session.");
     }
 
-    const session = await this.subAgentRunner.requestShutdown(sessionId);
+    const messages = await this.subAgentRunner.broadcastMessage(content, { sessionId, recursive, includeSelf });
     return {
-      summary: `Requested shutdown for session ${sessionId}`,
+      summary: `Broadcast agent message to ${messages.length} session(s)`,
+      data: {
+        sessionId: sessionId ?? null,
+        recursive,
+        includeSelf,
+        messages: messages.map((message) => ({
+          id: message.id,
+          fromSessionId: message.fromSessionId,
+          toSessionId: message.toSessionId,
+          direction: message.direction,
+          createdAt: message.createdAt,
+          content: message.content,
+        })),
+      },
+    };
+  }
+
+  private async requestAgentShutdown(sessionId: string, recursive: boolean): Promise<{ summary: string; data: JsonValue }> {
+    if (!this.subAgentRunner) {
+      throw new Error("Sub-agent runner is not configured for this session.");
+    }
+
+    const session = await this.subAgentRunner.requestShutdown(sessionId, { recursive });
+    return {
+      summary: `Requested shutdown for session ${sessionId}${recursive ? " and its descendants" : ""}`,
       data: {
         id: session.id,
+        recursive,
         lifecycleState: session.lifecycleState,
         updatedAt: session.updatedAt,
       },
     };
   }
 
-  private async cleanupAgentSession(sessionId: string): Promise<{ summary: string; data: JsonValue }> {
+  private async cleanupAgentSession(sessionId: string, recursive: boolean): Promise<{ summary: string; data: JsonValue }> {
     if (!this.subAgentRunner) {
       throw new Error("Sub-agent runner is not configured for this session.");
     }
 
-    const session = await this.subAgentRunner.cleanupSession(sessionId);
+    const session = await this.subAgentRunner.cleanupSession(sessionId, { recursive });
     return {
-      summary: `Cleaned up session ${sessionId}`,
+      summary: `Cleaned up session ${sessionId}${recursive ? " and its descendants" : ""}`,
       data: {
         id: session.id,
+        recursive,
         lifecycleState: session.lifecycleState,
         updatedAt: session.updatedAt,
       },

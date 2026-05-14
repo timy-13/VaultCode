@@ -5,6 +5,7 @@ import { createProvider } from "../provider/factory.js";
 import { getAbortMessage, isAbortError, OperationCancelledError } from "../runtime/abort.js";
 import { createUserMessage } from "../session/messages.js";
 import { createSession, ensureStorage, loadSession, saveSession } from "../session/store.js";
+import { injectEnabledSkills } from "../skills/prompt.js";
 import { LocalToolAdapter } from "../tools/local-tools.js";
 import { renderAssistantMessage, renderBanner, renderInfo, renderToolExecution, renderUserPrompt } from "../ui/render.js";
 import type { CliArgs } from "../ui/cli.js";
@@ -15,15 +16,17 @@ export async function runPrompt(args: CliArgs, workspaceRoot: string): Promise<v
 
   const config = await loadConfig({ provider: args.provider, model: args.model });
   const session = args.resumeSessionId ? await loadSession(args.resumeSessionId) : createSession();
+  await injectEnabledSkills(session, workspaceRoot, config.skills?.enabled ?? []);
   const provider = createProvider(config);
   const subAgentRunner = new LocalSubAgentRunner({
     workspaceRoot,
     provider,
     model: config.model,
     parentSessionId: session.id,
-    createToolAdapter: () => new LocalToolAdapter(workspaceRoot),
+    enabledSkills: config.skills?.enabled ?? [],
+    createToolAdapter: () => new LocalToolAdapter(workspaceRoot, { session }),
   });
-  const toolAdapter = new LocalToolAdapter(workspaceRoot, { subAgentRunner });
+  const toolAdapter = new LocalToolAdapter(workspaceRoot, { subAgentRunner, session });
 
   renderBanner(session, {
     provider: config.provider,
@@ -31,7 +34,7 @@ export async function runPrompt(args: CliArgs, workspaceRoot: string): Promise<v
     workspaceRoot,
   });
 
-  if (await maybeHandleSlashCommand(args.prompt, session)) {
+  if (await maybeHandleSlashCommand(args.prompt, session, workspaceRoot)) {
     return;
   }
 

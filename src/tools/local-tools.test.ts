@@ -11,20 +11,180 @@ import { LocalToolAdapter } from "./local-tools.js";
 test("local tool definitions expose structured schemas", () => {
   const adapter = new LocalToolAdapter(process.cwd());
   const write = adapter.listTools().find((tool) => tool.name === "write");
+  const listSkills = adapter.listTools().find((tool) => tool.name === "list_skills");
+  const loadSkill = adapter.listTools().find((tool) => tool.name === "load_skill");
+  const currentSkills = adapter.listTools().find((tool) => tool.name === "current_skills");
+  const readSkillResource = adapter.listTools().find((tool) => tool.name === "read_skill_resource");
   const lspDiagnostics = adapter.listTools().find((tool) => tool.name === "lsp_diagnostics");
   const listAgentTypes = adapter.listTools().find((tool) => tool.name === "list_agent_types");
+  const listActiveRuns = adapter.listTools().find((tool) => tool.name === "list_active_agent_runs");
   const listAgentMessages = adapter.listTools().find((tool) => tool.name === "list_agent_messages");
   const teamStatus = adapter.listTools().find((tool) => tool.name === "team_status");
+  const broadcastAgentMessage = adapter.listTools().find((tool) => tool.name === "broadcast_agent_message");
   const spawnAgent = adapter.listTools().find((tool) => tool.name === "spawn_agent");
 
   assert.ok(write);
+  assert.ok(listSkills);
+  assert.ok(loadSkill);
+  assert.ok(currentSkills);
+  assert.ok(readSkillResource);
   assert.ok(lspDiagnostics);
   assert.equal(listAgentTypes, undefined);
+  assert.equal(listActiveRuns, undefined);
   assert.equal(listAgentMessages, undefined);
   assert.equal(teamStatus, undefined);
+  assert.equal(broadcastAgentMessage, undefined);
   assert.equal(spawnAgent, undefined);
   assert.deepEqual(write?.inputSchema.required, ["path", "content"]);
   assert.equal(write?.inputSchema.additionalProperties, false);
+});
+
+test("skill tools return structured project skill results", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "timcode-tools-"));
+
+  try {
+    const skillDir = path.join(workspace, ".opencode", "skills", "custom-skill");
+    await fs.mkdir(skillDir, { recursive: true });
+    await fs.writeFile(
+      path.join(skillDir, "SKILL.md"),
+      "---\nname: custom-skill\ndescription: custom project skill\n---\n# Custom Skill\nUse this skill carefully.\n",
+      "utf8",
+    );
+    await fs.mkdir(path.join(skillDir, "docs"), { recursive: true });
+    await fs.writeFile(path.join(skillDir, "docs", "usage.md"), "usage", "utf8");
+
+    const adapter = new LocalToolAdapter(workspace);
+    const listResult = await adapter.executeTool(
+      {
+        id: "call-skill-1",
+        name: "list_skills",
+        input: {},
+      },
+      new AbortController().signal,
+    );
+    const loadResult = await adapter.executeTool(
+      {
+        id: "call-skill-2",
+        name: "load_skill",
+        input: { name: "custom-skill" },
+      },
+      new AbortController().signal,
+    );
+    const resourceResult = await adapter.executeTool(
+      {
+        id: "call-skill-3",
+        name: "read_skill_resource",
+        input: { name: "custom-skill", resourcePath: "docs/usage.md" },
+      },
+      new AbortController().signal,
+    );
+
+    assert.equal(listResult.ok, true);
+    assert.deepEqual(listResult.data, {
+      skills: [
+        {
+          name: "custom-skill",
+          description: "custom project skill",
+          dependencies: [],
+          source: "project",
+          directoryPath: skillDir,
+          entryFilePath: path.join(skillDir, "SKILL.md"),
+          resourcePaths: ["docs/usage.md"],
+          metadataWarnings: [],
+        },
+      ],
+    });
+
+    assert.equal(loadResult.ok, true);
+    assert.deepEqual(loadResult.data, {
+      name: "custom-skill",
+      description: "custom project skill",
+      dependencies: [],
+      source: "project",
+      directoryPath: skillDir,
+      entryFilePath: path.join(skillDir, "SKILL.md"),
+      resourcePaths: ["docs/usage.md"],
+      metadataWarnings: [],
+      content: "# Custom Skill\nUse this skill carefully.",
+    });
+
+    assert.equal(resourceResult.ok, true);
+    assert.deepEqual(resourceResult.data, {
+      skill: {
+        name: "custom-skill",
+        description: "custom project skill",
+        dependencies: [],
+        source: "project",
+        directoryPath: skillDir,
+        entryFilePath: path.join(skillDir, "SKILL.md"),
+        resourcePaths: ["docs/usage.md"],
+        metadataWarnings: [],
+      },
+      resourcePath: "docs/usage.md",
+      content: "usage",
+    });
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("current_skills returns the live session skill state", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "timcode-tools-"));
+
+  try {
+    const adapter = new LocalToolAdapter(workspace, {
+      session: {
+        schemaVersion: 1,
+        id: "session-1",
+        createdAt: "2024-01-01T00:00:00.000Z",
+        updatedAt: "2024-01-01T00:00:00.000Z",
+        lifecycleState: "running",
+        messages: [],
+        agentMessages: [],
+        loadedSkills: [
+          {
+            name: "brainstorming",
+            description: "Brainstorm before coding",
+            dependencies: [],
+            source: "project",
+            directoryPath: path.join(workspace, ".opencode", "skills", "brainstorming"),
+            entryFilePath: path.join(workspace, ".opencode", "skills", "brainstorming", "SKILL.md"),
+            resourcePaths: ["scripts/check.sh"],
+            metadataWarnings: [],
+          },
+        ],
+        toolHistory: [],
+      },
+    });
+
+    const result = await adapter.executeTool(
+      {
+        id: "call-current-skills-1",
+        name: "current_skills",
+        input: {},
+      },
+      new AbortController().signal,
+    );
+
+    assert.equal(result.ok, true);
+    assert.equal(result.summary, "Loaded 1 current skill(s)");
+    assert.deepEqual(result.data, {
+      skills: [
+        {
+          name: "brainstorming",
+          description: "Brainstorm before coding",
+          dependencies: [],
+          source: "project",
+          directoryPath: path.join(workspace, ".opencode", "skills", "brainstorming"),
+          entryFilePath: path.join(workspace, ".opencode", "skills", "brainstorming", "SKILL.md"),
+          resourcePaths: ["scripts/check.sh"],
+          metadataWarnings: [],
+        },
+      ],
+    });
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
 });
 
 test("write tool returns structured result payload", async () => {
@@ -245,11 +405,22 @@ test("spawn_agent returns structured child-agent results through an injected run
           {
             id: "child-session-1",
             parentSessionId: "parent-session-1",
+            depth: 1,
             createdAt: "2024-01-01T00:00:00.000Z",
             updatedAt: "2024-01-01T00:00:01.000Z",
             lifecycleState: "completed",
             messageCount: 3,
             lastAssistantText: "Delegated task complete.",
+          },
+        ];
+      },
+      async listActiveRuns() {
+        return [
+          {
+            sessionId: "child-session-1",
+            parentSessionId: "parent-session-1",
+            agentType: "worker",
+            startedAt: "2024-01-01T00:00:00.500Z",
           },
         ];
       },
@@ -275,8 +446,22 @@ test("spawn_agent returns structured child-agent results through an injected run
           content,
         };
       },
+      async broadcastMessage(content: string) {
+        return [
+          {
+            id: "message-3",
+            fromSessionId: "parent-session-1",
+            toSessionId: "child-session-1",
+            direction: "parent_to_child",
+            createdAt: "2024-01-01T00:00:03.500Z",
+            content,
+          },
+        ];
+      },
       async getTeamStatus() {
         return {
+          rootSessionId: "parent-session-1",
+          focusSessionId: "parent-session-1",
           parentSessionId: "parent-session-1",
           totalSessions: 2,
           counts: {
@@ -289,6 +474,7 @@ test("spawn_agent returns structured child-agent results through an injected run
             {
               id: "parent-session-1",
               parentSessionId: undefined,
+              depth: 0,
               createdAt: "2024-01-01T00:00:00.000Z",
               updatedAt: "2024-01-01T00:00:03.000Z",
               lifecycleState: "running",
@@ -298,6 +484,7 @@ test("spawn_agent returns structured child-agent results through an injected run
             {
               id: "child-session-1",
               parentSessionId: "parent-session-1",
+              depth: 1,
               createdAt: "2024-01-01T00:00:00.000Z",
               updatedAt: "2024-01-01T00:00:01.000Z",
               lifecycleState: "completed",
@@ -311,6 +498,7 @@ test("spawn_agent returns structured child-agent results through an injected run
         return {
           id: sessionId,
           parentSessionId: "parent-session-1",
+          depth: 1,
           createdAt: "2024-01-01T00:00:00.000Z",
           updatedAt: "2024-01-01T00:00:04.000Z",
           lifecycleState: "shutdown_requested",
@@ -322,6 +510,7 @@ test("spawn_agent returns structured child-agent results through an injected run
         return {
           id: sessionId,
           parentSessionId: "parent-session-1",
+          depth: 1,
           createdAt: "2024-01-01T00:00:00.000Z",
           updatedAt: "2024-01-01T00:00:05.000Z",
           lifecycleState: "cleaned_up",
@@ -334,17 +523,21 @@ test("spawn_agent returns structured child-agent results through an injected run
     const adapter = new LocalToolAdapter(workspace, { subAgentRunner: fakeRunner });
     const listAgentTypesTool = adapter.listTools().find((tool) => tool.name === "list_agent_types");
     const listAgentSessionsTool = adapter.listTools().find((tool) => tool.name === "list_agent_sessions");
+    const listActiveRunsTool = adapter.listTools().find((tool) => tool.name === "list_active_agent_runs");
     const teamStatusTool = adapter.listTools().find((tool) => tool.name === "team_status");
     const listAgentMessagesTool = adapter.listTools().find((tool) => tool.name === "list_agent_messages");
     const sendAgentMessageTool = adapter.listTools().find((tool) => tool.name === "send_agent_message");
+    const broadcastAgentMessageTool = adapter.listTools().find((tool) => tool.name === "broadcast_agent_message");
     const requestShutdownTool = adapter.listTools().find((tool) => tool.name === "request_agent_shutdown");
     const cleanupSessionTool = adapter.listTools().find((tool) => tool.name === "cleanup_agent_session");
     const spawnTool = adapter.listTools().find((tool) => tool.name === "spawn_agent");
     assert.ok(listAgentTypesTool);
     assert.ok(listAgentSessionsTool);
+    assert.ok(listActiveRunsTool);
     assert.ok(teamStatusTool);
     assert.ok(listAgentMessagesTool);
     assert.ok(sendAgentMessageTool);
+    assert.ok(broadcastAgentMessageTool);
     assert.ok(requestShutdownTool);
     assert.ok(cleanupSessionTool);
     assert.ok(spawnTool);
@@ -369,6 +562,14 @@ test("spawn_agent returns structured child-agent results through an injected run
       {
         id: "call-5bb",
         name: "team_status",
+        input: {},
+      },
+      new AbortController().signal,
+    );
+    const activeRunsResult = await adapter.executeTool(
+      {
+        id: "call-5bc",
+        name: "list_active_agent_runs",
         input: {},
       },
       new AbortController().signal,
@@ -405,6 +606,14 @@ test("spawn_agent returns structured child-agent results through an injected run
       },
       new AbortController().signal,
     );
+    const broadcastAgentMessageResult = await adapter.executeTool(
+      {
+        id: "call-5dd",
+        name: "broadcast_agent_message",
+        input: { content: "Team update." },
+      },
+      new AbortController().signal,
+    );
 
     const result = await adapter.executeTool(
       {
@@ -421,10 +630,12 @@ test("spawn_agent returns structured child-agent results through an injected run
     });
     assert.equal(agentSessionsResult.ok, true);
     assert.deepEqual(agentSessionsResult.data, {
+      recursive: false,
       sessions: [
         {
           id: "child-session-1",
           parentSessionId: "parent-session-1",
+          depth: 1,
           createdAt: "2024-01-01T00:00:00.000Z",
           updatedAt: "2024-01-01T00:00:01.000Z",
           lifecycleState: "completed",
@@ -435,6 +646,9 @@ test("spawn_agent returns structured child-agent results through an injected run
     });
     assert.equal(teamStatusResult.ok, true);
     assert.deepEqual(teamStatusResult.data, {
+      recursive: true,
+      rootSessionId: "parent-session-1",
+      focusSessionId: "parent-session-1",
       parentSessionId: "parent-session-1",
       totalSessions: 2,
       counts: {
@@ -447,6 +661,7 @@ test("spawn_agent returns structured child-agent results through an injected run
         {
           id: "parent-session-1",
           parentSessionId: null,
+          depth: 0,
           createdAt: "2024-01-01T00:00:00.000Z",
           updatedAt: "2024-01-01T00:00:03.000Z",
           lifecycleState: "running",
@@ -456,11 +671,25 @@ test("spawn_agent returns structured child-agent results through an injected run
         {
           id: "child-session-1",
           parentSessionId: "parent-session-1",
+          depth: 1,
           createdAt: "2024-01-01T00:00:00.000Z",
           updatedAt: "2024-01-01T00:00:01.000Z",
           lifecycleState: "completed",
           messageCount: 3,
           lastAssistantText: "Delegated task complete.",
+        },
+      ],
+    });
+    assert.equal(activeRunsResult.ok, true);
+    assert.deepEqual(activeRunsResult.data, {
+      sessionId: null,
+      recursive: true,
+      runs: [
+        {
+          sessionId: "child-session-1",
+          parentSessionId: "parent-session-1",
+          agentType: "worker",
+          startedAt: "2024-01-01T00:00:00.500Z",
         },
       ],
     });
@@ -487,15 +716,33 @@ test("spawn_agent returns structured child-agent results through an injected run
       createdAt: "2024-01-01T00:00:03.000Z",
       content: "Double-check the output.",
     });
+    assert.equal(broadcastAgentMessageResult.ok, true);
+    assert.deepEqual(broadcastAgentMessageResult.data, {
+      sessionId: null,
+      recursive: true,
+      includeSelf: false,
+      messages: [
+        {
+          id: "message-3",
+          fromSessionId: "parent-session-1",
+          toSessionId: "child-session-1",
+          direction: "parent_to_child",
+          createdAt: "2024-01-01T00:00:03.500Z",
+          content: "Team update.",
+        },
+      ],
+    });
     assert.equal(shutdownResult.ok, true);
     assert.deepEqual(shutdownResult.data, {
       id: "child-session-1",
+      recursive: false,
       lifecycleState: "shutdown_requested",
       updatedAt: "2024-01-01T00:00:04.000Z",
     });
     assert.equal(cleanupResult.ok, true);
     assert.deepEqual(cleanupResult.data, {
       id: "child-session-1",
+      recursive: false,
       lifecycleState: "cleaned_up",
       updatedAt: "2024-01-01T00:00:05.000Z",
     });
